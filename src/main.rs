@@ -16,7 +16,7 @@ async fn main() {
     let documents = std::include_bytes!("../movies.json");
     let documents: Vec<Document> = serde_json::from_reader(documents.as_ref()).unwrap();
     let client = reqwest::Client::builder();
-    let client = client.http2_prior_knowledge();
+    // let client = client.http2_prior_knowledge();
 
     let client = client.build().unwrap();
     let client = &client;
@@ -27,18 +27,26 @@ async fn main() {
     futures::stream::iter(documents.into_iter())
         .for_each_concurrent(16_000, |document| async move {
             let text = document.overview;
-            for (i, _) in text.char_indices() {
+            for (i, _) in text.char_indices().take(30) {
                 let query = &text[..i];
-                let res = client
-                    .get(format!("http://localhost:3000/search?q={}", query))
-                    .send()
-                    .await
-                    .unwrap();
+                let res = Box::pin(
+                    futures::stream::repeat_with(|| async {
+                        client
+                            .clone()
+                            .get(format!("http://localhost:3000/search?q={}", query))
+                            .send()
+                            .await
+                    })
+                    .filter_map(|res| async { res.await.ok() }),
+                )
+                .next()
+                .await
+                .unwrap();
                 let res = res.json::<Value>().await.unwrap();
-                let hits = res["results"].as_array().unwrap();
-
-                if let Some(pos) = hits.iter().position(|doc| doc["id"] == json!(document.id)) {
-                    score.fetch_add(10 - pos, Ordering::Relaxed);
+                if let Some(hits) = res["results"].as_array() {
+                    if let Some(pos) = hits.iter().position(|doc| doc["id"] == json!(document.id)) {
+                        score.fetch_add(10 - pos, Ordering::Relaxed);
+                    }
                 }
                 theorical_max.fetch_add(10, Ordering::Relaxed);
             }
