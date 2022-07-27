@@ -7,8 +7,11 @@ edition = "2021"
 
 [dependencies]
 futures = "0.3.21"
+# knuffel = "2.0.0" # the project is in a really bad shape and I can't make anything work
+miette = { version = "4.1.1", features = ["fancy"] }
 reqwest = { version = "0.11.11", default-features = false, features = ["rustls-tls", "json", "blocking"] }
 serde = { version = "1.0.139", features = ["serde_derive", "derive"] }
 serde_json = "1.0.82"
 tokio = { version = "1.20.0", features = ["rt-multi-thread", "macros"] }
+toml = "0.5.9"
 ureq = "2.5.0"
