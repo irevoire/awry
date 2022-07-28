@@ -1,50 +1,13 @@
+mod configuration;
+
+use configuration::Configuration;
+
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 use futures::StreamExt;
 use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
-
-#[derive(Debug, Deserialize)]
-pub struct Configuration {
-    verb: Verb,
-    url: String,
-    body: Option<String>,
-    result: String,
-}
-
-#[derive(Debug, Copy, Clone, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Verb {
-    Get,
-    Post,
-}
-
-impl Configuration {
-    pub async fn search(&self, client: Client, query: &str) -> reqwest::Result<reqwest::Response> {
-        match self.verb {
-            Verb::Get => client.get(self.url.replace("{}", query)).send().await,
-            Verb::Post => {
-                client
-                    .post(&self.url)
-                    .body(self.body.as_ref().unwrap().replace("{}", query))
-                    .send()
-                    .await
-            }
-        }
-    }
-
-    pub fn extract_ids(&self, result: &Value) -> Vec<Value> {
-        result
-            .get(&self.result)
-            .unwrap()
-            .as_array()
-            .unwrap()
-            .into_iter()
-            .map(|doc| doc["id"].clone())
-            .collect()
-    }
-}
 
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Document {
@@ -73,7 +36,7 @@ async fn main() {
     let score = &AtomicUsize::new(0);
 
     futures::stream::iter(documents.into_iter())
-        .for_each_concurrent(16_000, |document| async move {
+        .for_each_concurrent(1_000, |document| async move {
             let text = document.overview;
             for (i, _) in text.char_indices().take(30) {
                 let query = &text[..i];
@@ -83,6 +46,8 @@ async fn main() {
                     })
                     .map(|res| async {
                         let res = res.await;
+                        // TODO: ensure this is an unauthorized error before ignoring it
+                        // and introduce a timer or something instead of spamming
                         if res.is_err() {
                             println!("Error");
                         }
@@ -93,11 +58,13 @@ async fn main() {
                 .next()
                 .await
                 .unwrap();
+                if res.status() != 200 {
+                    println!("error with query: {query}");
+                }
                 let res = res.json::<Value>().await.unwrap();
-                if let Some(hits) = res["results"].as_array() {
-                    if let Some(pos) = hits.iter().position(|doc| doc["id"] == json!(document.id)) {
-                        score.fetch_add(10 - pos, Ordering::Relaxed);
-                    }
+                let ids = conf.extract_ids(&res);
+                if let Some(pos) = ids.iter().position(|id| id == &json!(document.id)) {
+                    score.fetch_add(10 - pos, Ordering::Relaxed);
                 }
                 theorical_max.fetch_add(10, Ordering::Relaxed);
             }
