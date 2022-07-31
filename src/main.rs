@@ -3,10 +3,7 @@ mod configuration;
 use configuration::Configuration;
 use tokio::sync::mpsc;
 
-use std::sync::atomic::{AtomicUsize, Ordering};
-
 use futures::StreamExt;
-use reqwest::Client;
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
 
@@ -39,53 +36,85 @@ async fn main() {
 
     let (sender, mut receiver) = mpsc::channel(100);
 
-    let main_op = tokio::spawn(async move {
+    tokio::spawn(async move {
         let sender = &sender.clone();
-        futures::stream::iter(documents.into_iter())
+        futures::stream::iter(documents.into_iter().take(50))
             .for_each_concurrent(1_000, move |document| async {
                 let text = &document.overview;
-                for (i, _) in text.char_indices().take(30) {
-                    let query = &text[..i];
-                    let res = Box::pin(
-                        futures::stream::repeat_with(|| async {
-                            conf.search(client.clone(), query).await
-                        })
-                        .map(|res| async {
-                            let res = res.await;
-                            // TODO: ensure this is an unauthorized error before ignoring it
-                            // and introduce a timer or something instead of spamming
-                            if res.is_err() {
-                                println!("Error");
-                            }
-                            res
-                        })
-                        .filter_map(|res| async { res.await.ok() }),
-                    )
-                    .next()
-                    .await
-                    .unwrap();
-                    if res.status() != 200 {
-                        println!("error with query: {query}");
-                    }
-                    let res = res.json::<Value>().await.unwrap();
-                    let ids = conf.extract_ids(&res);
-                    if let Some(pos) = ids.iter().position(|id| id == &json!(document.id)) {
-                        sender.clone().send(pos).await.unwrap();
+                let words_indices: Vec<_> = std::iter::once(0)
+                    .chain(text.match_indices(' ').map(|(i, s)| i + s.len()))
+                    .chain(std::iter::once(text.len()))
+                    .collect();
+
+                for words_indices in words_indices.windows(4) {
+                    let start = words_indices[0];
+                    let end = words_indices[3];
+
+                    for end in text[start..end]
+                        .char_indices()
+                        .skip(1)
+                        .map(|(i, _)| i + start)
+                    {
+                        let query = &text[start..end];
+                        // println!("{query}");
+                        let res = Box::pin(
+                            futures::stream::repeat_with(|| async {
+                                conf.search(client.clone(), query).await
+                            })
+                            .map(|res| async {
+                                let res = res.await;
+                                // TODO: ensure this is an unauthorized error before ignoring it
+                                // and introduce a timer or something instead of spamming
+                                if res.is_err() {
+                                    println!("Error");
+                                }
+                                res
+                            })
+                            .filter_map(|res| async { res.await.ok() }),
+                        )
+                        .next()
+                        .await
+                        .unwrap();
+                        if res.status() != 200 {
+                            println!("error with query: {query}");
+                        }
+                        let res = res.json::<Value>().await.unwrap();
+                        let ids = conf.extract_ids(&res);
+                        if let Some(score) = ids.iter().position(|id| id == &json!(document.id)) {
+                            sender
+                                .clone()
+                                .send(Request::new(end, text, score))
+                                .await
+                                .unwrap();
+                        }
                     }
                 }
             })
             .await;
     });
 
-    let mut score = 0;
-    let mut theorical_max = 0;
+    let mut score = [0; 3];
+    let mut theorical_max = [0; 3];
 
     while let Some(res) = receiver.recv().await {
-        score += 10 - res;
-        theorical_max += 10;
+        let s = 10 - res.score;
+
+        for kind in res.kinds {
+            score[kind as usize] += s;
+            theorical_max[kind as usize] += 10;
+        }
+        score[2] += s;
+        theorical_max[2] += 10;
     }
 
-    println!("Got a score of {:?} on {:?}", score, theorical_max);
+    let scores = score
+        .into_iter()
+        .zip(theorical_max.into_iter())
+        .map(|(score, max)| score * 100 / max)
+        .collect::<Vec<_>>();
+
+    println!("{:8} | {:8} | {:8}", "exact", "prefix", "total");
+    println!("{:8} | {:8} | {:8}", scores[0], scores[1], scores[2]);
 }
 
 #[derive(Debug, Clone)]
@@ -94,10 +123,28 @@ pub struct Request {
     kinds: Vec<Kind>,
 }
 
+impl Request {
+    pub fn new(end: usize, origin: &str, score: usize) -> Self {
+        let mut kinds = Vec::new();
+
+        // we end in the middle of a word
+        if matches!(origin.bytes().nth(end + 1), None | Some(b' ')) {
+            kinds.push(Kind::Prefix);
+        }
+
+        // we were not a prefix or a suffix, thus we’re an exact match
+        if kinds.is_empty() {
+            kinds.push(Kind::Exact);
+        }
+
+        Self { score, kinds }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub enum Kind {
-    Exact,
+    Exact = 0,
     Prefix,
-    Suffix,
-    Typo,
+    Total,
+    // Typo,
 }
