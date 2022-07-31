@@ -1,6 +1,7 @@
 mod configuration;
 
 use configuration::Configuration;
+use indicatif::{MultiProgress, ProgressBar};
 use tokio::sync::mpsc;
 
 use futures::StreamExt;
@@ -36,9 +37,24 @@ async fn main() {
 
     let (sender, mut receiver) = mpsc::channel(100);
 
+    let limit = 50;
+
+    let multibar = MultiProgress::new();
+    let document_bar = ProgressBar::new(50);
+    let words_bar = ProgressBar::new(10);
+
+    multibar.add(document_bar.clone());
+    multibar.add(words_bar.clone());
+
+    document_bar.println("Documents");
+    words_bar.println("Words");
+
     tokio::spawn(async move {
         let sender = &sender.clone();
-        futures::stream::iter(documents.into_iter().take(50))
+        let document_bar = &document_bar.clone();
+        let words_bar = &words_bar.clone();
+
+        futures::stream::iter(documents.into_iter().take(limit))
             .for_each_concurrent(1_000, move |document| async {
                 let text = &document.overview;
                 let words_indices: Vec<_> = std::iter::once(0)
@@ -46,7 +62,10 @@ async fn main() {
                     .chain(std::iter::once(text.len()))
                     .collect();
 
-                for words_indices in words_indices.windows(4) {
+                let iter = words_indices.windows(4);
+                words_bar.set_length(words_bar.length().unwrap_or_default() + iter.len() as u64);
+
+                for words_indices in iter {
                     let start = words_indices[0];
                     let end = words_indices[3];
 
@@ -88,10 +107,17 @@ async fn main() {
                                 .unwrap();
                         }
                     }
+                    words_bar.inc(1);
                 }
+                document_bar.inc(1);
             })
             .await;
     });
+
+    // if we have an error now, let’s just ignore it
+    if let Err(e) = multibar.clear() {
+        println!("An error happened with the loading bar; {e}");
+    }
 
     let mut score = [0; 3];
     let mut theorical_max = [0; 3];

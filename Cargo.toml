@@ -7,6 +7,7 @@ edition = "2021"
 
 [dependencies]
 futures = "0.3.21"
+indicatif = "0.17.0"
 # knuffel = "2.0.0" # the project is in a really bad shape and I can't make anything work
 # miette = { version = "4.1.1", features = ["fancy"] }
 reqwest = { version = "0.11.11", default-features = false, features = ["rustls-tls", "json", "blocking"] }
